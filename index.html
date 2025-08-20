@@ -258,43 +258,69 @@
   let renderRequest = null;
   let saveTimeout = null;
 
-  const dbPromise = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onerror = () => reject(req.error);
-    req.onsuccess = () => resolve(req.result);
-    req.onupgradeneeded = (event) => {
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: 'id' });
-      }
-    };
-  });
+  // --- IndexedDB Wrapper with Proper Error Handling ---
+  const DB = {
+    db: null,
+    async open() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => console.warn('DB blocked');
+        req.onupgradeneeded = (event) => {
+          const db = event.target.result;
+          if (!db.objectStoreNames.contains(STORE_NAME)) {
+            db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+          }
+        };
+        req.onsuccess = (event) => {
+          this.db = event.target.result;
+          resolve(this.db);
+        };
+      });
+    },
+    async get(key) {
+      const db = this.db || await this.open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readonly');
+        const store = tx.objectStore(STORE_NAME);
+        const req = store.get(key);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    },
+    async put(key, value) {
+      const db = this.db || await this.open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        const req = store.put({ id: key, data: value });
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+        tx.oncomplete = () => resolve(); // Important: wait for completion
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+  };
 
   function uid(){ return 'id-' + Math.random().toString(36).slice(2,9) }
 
+  // --- Save & Load ---
   async function save() {
     try {
-      const db = await dbPromise;
-      const tx = db.transaction(STORE_NAME, 'readwrite');
-      const store = tx.objectStore(STORE_NAME);
-      store.put({ id: 'state', data: state });
-      await tx.done;
+      await DB.put('state', state);
       showSaveStatus('Saved!');
     } catch (e) {
-      console.error('Error saving data:', e);
+      console.error('Failed to save:', e);
       showSaveStatus('Save failed!');
     }
   }
 
   async function load() {
     try {
-      const db = await dbPromise;
-      const tx = db.transaction(STORE_NAME, 'readonly');
-      const store = tx.objectStore(STORE_NAME);
-      const result = await store.get('state');
+      const result = await DB.get('state');
       return result?.data || null;
     } catch (e) {
-      console.error('Error loading data:', e);
+      console.error('Failed to load:', e);
       return null;
     }
   }
@@ -346,6 +372,9 @@
 
   async function init() {
     try {
+      // Ensure DB is opened
+      await DB.open();
+
       const savedState = await load();
       if (savedState) {
         state = savedState;
@@ -360,13 +389,13 @@
         };
         state.classes.push(sample);
         state.ui.activeClassId = sample.id;
-        debouncedSave();
+        await save(); // Save immediately so it persists
       }
       renderAll();
       $('#studentsBody').addEventListener('click', handleStudentAction);
     } catch (e) {
       console.error('Init failed:', e);
-      alert('Failed to load. Try resetting.');
+      alert('Failed to load app. Check console (Ctrl+Shift+J).');
     }
   }
 
@@ -768,7 +797,7 @@
   // ✅ Fixed Save Button: Force immediate save
   $('#btnSave').addEventListener('click', async () => {
     clearTimeout(saveTimeout);
-    await save(); // Wait for save to complete
+    await save(); // Now works reliably
   });
 
   $('#btnPrev').addEventListener('click', () => {
@@ -788,6 +817,7 @@
     }
   });
 
+  // Initialize
   init();
 })();
 </script>

@@ -89,6 +89,9 @@
     .hidden{ display:none }
     .save-status{ position:fixed; bottom:20px; right:20px; padding:8px 12px; border-radius:8px; background:var(--panel); border:1px solid rgba(148,163,184,.2); font-size:12px; opacity:0; transition:opacity .3s ease }
     .save-status.show{ opacity:1 }
+    .pagination{ display:flex; justify-content:center; align-items:center; gap:8px; margin-top:12px }
+    .pagination button{ padding:6px 12px; border-radius:8px; background:var(--chip); border:1px solid rgba(148,163,184,.2) }
+    .pagination button:disabled{ opacity:.5; cursor:not-allowed }
   </style>
 </head>
 <body>
@@ -159,6 +162,11 @@
                 </thead>
                 <tbody id="studentsBody"></tbody>
               </table>
+              <div class="pagination">
+                <button class="btn small" id="btnPrev" disabled>Previous</button>
+                <span class="muted" id="pageInfo">Page 1</span>
+                <button class="btn small" id="btnNext" disabled>Next</button>
+              </div>
             </div>
           </div>
         </div>
@@ -205,6 +213,7 @@
   const DB_NAME = 'MagicITClassDB';
   const DB_VERSION = 1;
   const STORE_NAME = 'appState';
+  const ITEMS_PER_PAGE = 20;
 
   const defaultPowers = [
     { id: uid(), emoji:'🎵', name:'Summon Music (5 min)', cost:20 },
@@ -215,7 +224,8 @@
     { id: uid(), emoji:'🎁', name:'Mystery Chest', cost:100 },
   ];
 
-  let state = { classes: [], powers: defaultPowers, ui: { activeClassId: null, selectedStudentId: null }, history: [] };
+  let state = { classes: [], powers: defaultPowers, ui: { activeClassId: null, selectedStudentId: null, currentPage: 1 }, history: [] };
+  let renderRequest = null;
 
   // Open/create the IndexedDB database
   const dbPromise = indexedDB.open(DB_NAME, DB_VERSION);
@@ -274,6 +284,15 @@
     try{ state = JSON.parse(snapshot); renderAll(); }catch(e){}
   }
 
+  function scheduleRender() {
+    if (!renderRequest) {
+      renderRequest = requestAnimationFrame(() => {
+        renderAll();
+        renderRequest = null;
+      });
+    }
+  }
+
   // Rendering
   async function init() {
     const savedState = await load();
@@ -293,7 +312,7 @@
     renderAll();
   }
 
-  function renderAll(){ renderClasses(); renderPowers(); renderStudents(); updateActiveClassChip(); buildShop(); }
+  function renderAll(){ renderClasses(); renderPowers(); renderStudents(); updateActiveClassChip(); buildShop(); updatePagination(); }
 
   function renderClasses(){
     const list = $('#classList');
@@ -302,7 +321,7 @@
       const div = document.createElement('div');
       div.className = 'class-item' + (cls.id===state.ui.activeClassId ? ' active':'' );
       div.innerHTML = `<div style="display:flex;flex-direction:column"><strong>${escapeHtml(cls.name)}</strong><small class="muted">${cls.students.length} students</small></div><div class="class-actions"><span class="chip">Pts avg: ${avgPoints(cls)}</span></div>`;
-      div.addEventListener('click', ()=>{ state.ui.activeClassId = cls.id; state.ui.selectedStudentId = null; renderAll(); });
+      div.addEventListener('click', ()=>{ state.ui.activeClassId = cls.id; state.ui.selectedStudentId = null; state.ui.currentPage = 1; scheduleRender(); });
       list.appendChild(div);
     });
   }
@@ -329,11 +348,15 @@
     const cls = getActiveClass();
     if(!cls){ body.innerHTML = `<tr><td colspan="4" class="muted">Create or select a class to begin.</td></tr>`; return }
 
-    // Sort and limit students for performance
-    const visibleStudents = [...cls.students].sort((a,b)=> b.points - a.points || a.name.localeCompare(b.name)).slice(0, 50);
+    // Sort students
+    const sortedStudents = [...cls.students].sort((a,b)=> b.points - a.points || a.name.localeCompare(b.name));
+
+    // Paginate students
+    const startIdx = (state.ui.currentPage - 1) * ITEMS_PER_PAGE;
+    const paginatedStudents = sortedStudents.slice(startIdx, startIdx + ITEMS_PER_PAGE);
     const fragment = document.createDocumentFragment();
 
-    visibleStudents.forEach(stu=>{
+    paginatedStudents.forEach(stu=>{
       const tr = document.createElement('tr');
       tr.dataset.id = stu.id;
       if(state.ui.selectedStudentId===stu.id) tr.style.outline = '2px solid var(--accent-2)';
@@ -364,7 +387,7 @@
 
       tr.addEventListener('click', (e)=>{
         if(e.target.closest('button')) return;
-        state.ui.selectedStudentId = stu.id; renderStudents();
+        state.ui.selectedStudentId = stu.id; scheduleRender();
       });
 
       tr.querySelectorAll('button').forEach(btn=>{
@@ -383,6 +406,20 @@
       fragment.appendChild(tr);
     });
     body.appendChild(fragment);
+  }
+
+  function updatePagination() {
+    const cls = getActiveClass();
+    if (!cls) return;
+
+    const pageInfo = $('#pageInfo');
+    const btnPrev = $('#btnPrev');
+    const btnNext = $('#btnNext');
+    const totalPages = Math.ceil(cls.students.length / ITEMS_PER_PAGE);
+
+    pageInfo.textContent = `Page ${state.ui.currentPage} of ${totalPages}`;
+    btnPrev.disabled = state.ui.currentPage <= 1;
+    btnNext.disabled = state.ui.currentPage >= totalPages;
   }
 
   function renderPowerIcon(powerId){
@@ -430,7 +467,8 @@
     const cls = { id: uid(), name: name.trim(), students: [] };
     state.classes.push(cls);
     state.ui.activeClassId = cls.id;
-    save().then(renderAll);
+    state.ui.currentPage = 1;
+    save().then(scheduleRender);
   }
 
   function deleteClass(){
@@ -440,7 +478,8 @@
     state.classes = state.classes.filter(c=>c.id!==cls.id);
     state.ui.activeClassId = state.classes[0]?.id || null;
     state.ui.selectedStudentId = null;
-    save().then(renderAll);
+    state.ui.currentPage = 1;
+    save().then(scheduleRender);
   }
 
   function renameClass(){
@@ -449,7 +488,7 @@
     if(!name) return;
     pushHistory();
     cls.name = name.trim();
-    save().then(renderAll);
+    save().then(scheduleRender);
   }
 
   function addStudent(name){
@@ -458,7 +497,7 @@
     if(cls.students.some(s=>s.name.toLowerCase()===clean.toLowerCase())) return;
     pushHistory();
     cls.students.push({ id: uid(), name: clean, points: 0, powers: [] });
-    save().then(() => { renderStudents(); renderClasses(); });
+    save().then(() => { renderStudents(); renderClasses(); updatePagination(); });
   }
 
   function removeStudent(stu){
@@ -467,7 +506,14 @@
     pushHistory();
     cls.students = cls.students.filter(s=>s.id!==stu.id);
     if(state.ui.selectedStudentId===stu.id) state.ui.selectedStudentId=null;
-    save().then(() => { renderStudents(); renderClasses(); });
+
+    // Adjust current page if needed
+    const totalPages = Math.ceil(cls.students.length / ITEMS_PER_PAGE);
+    if (state.ui.currentPage > totalPages && totalPages > 0) {
+      state.ui.currentPage = totalPages;
+    }
+
+    save().then(() => { renderStudents(); renderClasses(); updatePagination(); });
   }
 
   function renameStudent(stu){
@@ -475,7 +521,7 @@
     if(!name) return;
     pushHistory();
     stu.name = name.trim();
-    save().then(renderStudents);
+    save().then(scheduleRender);
   }
 
   function changePoints(stu, delta){
@@ -522,7 +568,8 @@
     pushHistory();
     unique.forEach(n=> cls.students.push({ id: uid(), name:n, points:0, powers:[] }));
     $('#namesInput').value='';
-    save().then(() => { renderStudents(); renderClasses(); });
+    state.ui.currentPage = 1;
+    save().then(() => { renderStudents(); renderClasses(); updatePagination(); });
   }
 
   function importCsvFile(file){
@@ -562,7 +609,8 @@
           if(!obj || !obj.classes) throw new Error('Invalid file');
           pushHistory();
           state = obj;
-          save().then(renderAll);
+          state.ui.currentPage = 1;
+          save().then(scheduleRender);
         }catch(e){ alert('Invalid JSON') }
       };
       r.readAsText(f);
@@ -573,8 +621,8 @@
   function resetAll(){
     if(!confirm('This will erase all classes and data. Continue?')) return;
     pushHistory();
-    state = { classes: [], powers: defaultPowers.map(p=>({...p})), ui:{activeClassId:null, selectedStudentId:null}, history:[] };
-    save().then(renderAll);
+    state = { classes: [], powers: defaultPowers.map(p=>({...p})), ui:{activeClassId:null, selectedStudentId:null, currentPage: 1}, history:[] };
+    save().then(scheduleRender);
   }
 
   function escapeHtml(str){
@@ -602,6 +650,22 @@
   $('#btnReset').addEventListener('click', resetAll);
   $('#btnUndo').addEventListener('click', undo);
   $('#btnSave').addEventListener('click', save);
+  $('#btnPrev').addEventListener('click', () => {
+    if (state.ui.currentPage > 1) {
+      state.ui.currentPage--;
+      scheduleRender();
+    }
+  });
+  $('#btnNext').addEventListener('click', () => {
+    const cls = getActiveClass();
+    if (cls) {
+      const totalPages = Math.ceil(cls.students.length / ITEMS_PER_PAGE);
+      if (state.ui.currentPage < totalPages) {
+        state.ui.currentPage++;
+        scheduleRender();
+      }
+    }
+  });
 
   // Initialize the app
   init();

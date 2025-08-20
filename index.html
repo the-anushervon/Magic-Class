@@ -63,11 +63,31 @@
     .card{ background:var(--panel); border:1px solid rgba(148,163,184,.15); border-radius:var(--radius); overflow:hidden }
     .card h3{ margin:0; padding:14px 16px; border-bottom:1px solid rgba(148,163,184,.12); font-size:16px}
     .card .body{ padding:14px 16px; display:flex; flex-direction:column; gap:12px }
-    table{ width:100%; border-collapse:separate; border-spacing:0 8px }
-    thead th{ text-align:left; font-size:13px; color:var(--muted); font-weight:600; padding:4px 8px }
-    tbody td{ background:var(--card); padding:10px 8px; border-top:1px solid rgba(148,163,184,.14); border-bottom:1px solid rgba(148,163,184,.14) }
-    tbody tr td:first-child{ border-left:1px solid rgba(148,163,184,.14); border-top-left-radius:12px; border-bottom-left-radius:12px }
-    tbody tr td:last-child{ border-right:1px solid rgba(148,163,184,.14); border-top-right-radius:12px; border-bottom-right-radius:12px }
+
+    /* Scrollable student table */
+    .table-container {
+      max-height: 500px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      border-radius: 0 0 12px 12px;
+    }
+
+    table {
+      width:100%; border-collapse:separate; border-spacing:0 8px
+    }
+    thead th {
+      text-align:left; font-size:13px; color:var(--muted); font-weight:600; padding:4px 8px; background:var(--panel); position:sticky; top:0; z-index:1;
+    }
+    tbody td {
+      background:var(--card); padding:10px 8px; border-top:1px solid rgba(148,163,184,.14); border-bottom:1px solid rgba(148,163,184,.14)
+    }
+    tbody tr td:first-child {
+      border-left:1px solid rgba(148,163,184,.14); border-top-left-radius:12px; border-bottom-left-radius:12px
+    }
+    tbody tr td:last-child {
+      border-right:1px solid rgba(148,163,184,.14); border-top-right-radius:12px; border-bottom-right-radius:12px
+    }
+
     .name-cell{ display:flex; align-items:center; gap:10px }
     .avatar{ width:28px; height:28px; border-radius:8px; display:grid; place-items:center; background:#111827; border:1px solid rgba(148,163,184,.18); font-size:14px }
     .powers{ display:flex; gap:6px; flex-wrap:wrap }
@@ -126,7 +146,11 @@
         <h3>Superpowers</h3>
         <div class="body">
           <small class="muted">Customize shop (emoji, name, cost). Example: 🎵 Music (20)</small>
-          <div style="display:flex; gap:8px"><input id="powerEmoji" placeholder="🎵" style="max-width:80px"><input id="powerName" placeholder="Summon Music"><input id="powerCost" type="number" min="1" placeholder="20" style="max-width:100px"></div>
+          <div style="display:flex; gap:8px">
+            <input id="powerEmoji" placeholder="🎵" style="max-width:80px">
+            <input id="powerName" placeholder="Summon Music">
+            <input id="powerCost" type="number" min="1" placeholder="20" style="max-width:100px">
+          </div>
           <button class="btn" id="btnAddPower">Add Power</button>
           <div id="powerChips" class="class-actions"></div>
         </div>
@@ -150,7 +174,7 @@
         <div class="card">
           <h3>Students</h3>
           <div class="body">
-            <div style="overflow:auto;">
+            <div class="table-container">
               <table>
                 <thead>
                   <tr>
@@ -162,11 +186,11 @@
                 </thead>
                 <tbody id="studentsBody"></tbody>
               </table>
-              <div class="pagination">
-                <button class="btn small" id="btnPrev" disabled>Previous</button>
-                <span class="muted" id="pageInfo">Page 1</span>
-                <button class="btn small" id="btnNext" disabled>Next</button>
-              </div>
+            </div>
+            <div class="pagination">
+              <button class="btn small" id="btnPrev" disabled>Previous</button>
+              <span class="muted" id="pageInfo">Page 1</span>
+              <button class="btn small" id="btnNext" disabled>Next</button>
             </div>
           </div>
         </div>
@@ -229,19 +253,22 @@
     powers: defaultPowers,
     ui: { activeClassId: null, selectedStudentId: null, currentPage: 1 },
     history: [],
-    __historyLastSave: 0  // cooldown timestamp
+    __historyLastSave: 0
   };
   let renderRequest = null;
   let saveTimeout = null;
 
-  const dbPromise = indexedDB.open(DB_NAME, DB_VERSION);
-
-  dbPromise.onupgradeneeded = (event) => {
-    const db = event.target.result;
-    if (!db.objectStoreNames.contains(STORE_NAME)) {
-      db.createObjectStore(STORE_NAME, { keyPath: 'id' });
-    }
-  };
+  const dbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => resolve(req.result);
+    req.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+      }
+    };
+  });
 
   function uid(){ return 'id-' + Math.random().toString(36).slice(2,9) }
 
@@ -250,7 +277,7 @@
       const db = await dbPromise;
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
-      await store.put({ id: 'state', data: state });
+      store.put({ id: 'state', data: state });
       await tx.done;
       showSaveStatus('Saved!');
     } catch (e) {
@@ -259,18 +286,12 @@
     }
   }
 
-  function debouncedSave() {
-    clearTimeout(saveTimeout);
-    saveTimeout = setTimeout(save, 500);
-  }
-
   async function load() {
     try {
       const db = await dbPromise;
       const tx = db.transaction(STORE_NAME, 'readonly');
       const store = tx.objectStore(STORE_NAME);
       const result = await store.get('state');
-      await tx.done;
       return result?.data || null;
     } catch (e) {
       console.error('Error loading data:', e);
@@ -287,9 +308,8 @@
 
   function pushHistory(){
     const now = Date.now();
-    if (now - state.__historyLastSave < 2000) return; // 2s cooldown
+    if (now - state.__historyLastSave < 2000) return;
     state.__historyLastSave = now;
-
     try {
       const snapshot = JSON.stringify({
         classes: state.classes,
@@ -343,12 +363,10 @@
         debouncedSave();
       }
       renderAll();
-
-      // Event delegation for student actions
       $('#studentsBody').addEventListener('click', handleStudentAction);
     } catch (e) {
       console.error('Init failed:', e);
-      alert('Failed to load app. Try resetting.');
+      alert('Failed to load. Try resetting.');
     }
   }
 
@@ -524,7 +542,7 @@
   function openShop(){ $('#shopModal').style.display = 'flex'; }
   function closeShop(){ $('#shopModal').style.display = 'none'; }
 
-  // Actions
+  // --- Actions ---
   function addClass(){
     const name = prompt('Class name (e.g., 7A):');
     if (!name) return;
@@ -655,7 +673,7 @@
       const names = text.split(/\r?\n/).map(line => line.split(',')[0].trim()).filter(Boolean);
       const textarea = $('#namesInput');
       textarea.value = ((textarea.value || '') + '\n' + names.join('\n')).trim();
-      $('#fileCsv').value = ''; // Prevent re-trigger
+      $('#fileCsv').value = '';
     };
     reader.readAsText(file);
   }
@@ -721,7 +739,12 @@
     return String(str).replace(/[&<>"]/g, s => ({'&':'&amp;','<':'<','>':'>','"':'&quot;'}[s]));
   }
 
-  // Event Listeners
+  function debouncedSave() {
+    clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(save, 500);
+  }
+
+  // --- Event Listeners ---
   $('#btnAddClass').addEventListener('click', addClass);
   $('#btnDeleteClass').addEventListener('click', deleteClass);
   $('#btnRenameClass').addEventListener('click', renameClass);
@@ -741,7 +764,13 @@
   $('#btnImportJson').addEventListener('click', importJson);
   $('#btnReset').addEventListener('click', resetAll);
   $('#btnUndo').addEventListener('click', undo);
-  $('#btnSave').addEventListener('click', () => { clearTimeout(saveTimeout); save(); }); // Immediate save
+
+  // ✅ Fixed Save Button: Force immediate save
+  $('#btnSave').addEventListener('click', async () => {
+    clearTimeout(saveTimeout);
+    await save(); // Wait for save to complete
+  });
+
   $('#btnPrev').addEventListener('click', () => {
     if (state.ui.currentPage > 1) {
       state.ui.currentPage--;

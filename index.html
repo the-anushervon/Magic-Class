@@ -202,7 +202,10 @@
 (function(){
   const $ = sel => document.querySelector(sel);
   const $$ = sel => Array.from(document.querySelectorAll(sel));
-  const STORAGE_KEY = 'magic_it_class_v1';
+  const DB_NAME = 'MagicITClassDB';
+  const DB_VERSION = 1;
+  const STORE_NAME = 'appState';
+
   const defaultPowers = [
     { id: uid(), emoji:'🎵', name:'Summon Music (5 min)', cost:20 },
     { id: uid(), emoji:'⏳', name:'Time Turner (skip small homework)', cost:30 },
@@ -211,30 +214,60 @@
     { id: uid(), emoji:'🪄', name:"Magic Helper (teacher's assistant)", cost:60 },
     { id: uid(), emoji:'🎁', name:'Mystery Chest', cost:100 },
   ];
-  let state = load() || {
-    classes: [],
-    powers: defaultPowers,
-    ui: { activeClassId: null, selectedStudentId: null },
-    history: []
+
+  let state = { classes: [], powers: defaultPowers, ui: { activeClassId: null, selectedStudentId: null }, history: [] };
+
+  // Open/create the IndexedDB database
+  const dbPromise = indexedDB.open(DB_NAME, DB_VERSION);
+
+  dbPromise.onupgradeneeded = (event) => {
+    const db = event.target.result;
+    db.createObjectStore(STORE_NAME, { keyPath: 'id' });
   };
 
   // Utilities
   function uid(){ return 'id-' + Math.random().toString(36).slice(2,9) }
-  function save() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    showSaveStatus('Saved!');
+
+  async function save() {
+    try {
+      const db = await dbPromise;
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      await store.put({ id: 'state', data: state });
+      await tx.done;
+      showSaveStatus('Saved!');
+    } catch (e) {
+      console.error('Error saving data:', e);
+      showSaveStatus('Save failed!');
+    }
   }
-  function load(){ try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)) }catch(e){ return null } }
+
+  async function load() {
+    try {
+      const db = await dbPromise;
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const result = await store.get('state');
+      await tx.done;
+      return result?.data || null;
+    } catch (e) {
+      console.error('Error loading data:', e);
+      return null;
+    }
+  }
+
   function showSaveStatus(msg) {
     const el = $('#saveStatus');
     el.textContent = msg;
     el.classList.add('show');
     setTimeout(() => el.classList.remove('show'), 2000);
   }
+
   function pushHistory(){
     state.history.push(JSON.stringify(state));
     if(state.history.length>20) state.history.shift();
   }
+
   function undo(){
     const snapshot = state.history.pop();
     if(!snapshot) return;
@@ -242,7 +275,26 @@
   }
 
   // Rendering
+  async function init() {
+    const savedState = await load();
+    if (savedState) {
+      state = savedState;
+    } else if (!state.classes.length) {
+      // Create a sample class if no data exists
+      const sample = { id: uid(), name: '7A', students: [
+        { id: uid(), name:'Ali', points: 3, powers:[] },
+        { id: uid(), name:'Zarina', points: 1, powers:[] },
+        { id: uid(), name:'Said', points: 0, powers:[] },
+      ]};
+      state.classes.push(sample);
+      state.ui.activeClassId = sample.id;
+      await save();
+    }
+    renderAll();
+  }
+
   function renderAll(){ renderClasses(); renderPowers(); renderStudents(); updateActiveClassChip(); buildShop(); }
+
   function renderClasses(){
     const list = $('#classList');
     list.innerHTML = '';
@@ -254,26 +306,34 @@
       list.appendChild(div);
     });
   }
+
   function updateActiveClassChip(){
     const chip = $('#activeClassChip');
     const cls = getActiveClass();
     chip.textContent = cls ? `${cls.name} — ${cls.students.length} students` : 'No class selected';
   }
+
   function avgPoints(cls){
     const n = cls.students.length || 1;
     const sum = cls.students.reduce((a,s)=>a+(s.points||0),0);
     return Math.round(sum/n);
   }
+
   function getActiveClass(){ return state.classes.find(c=>c.id===state.ui.activeClassId) || null }
+
   function getActiveStudent(){ const cls=getActiveClass(); if(!cls) return null; return cls.students.find(s=>s.id===state.ui.selectedStudentId) || null }
+
   function renderStudents(){
     const body = $('#studentsBody');
     body.innerHTML = '';
     const cls = getActiveClass();
     if(!cls){ body.innerHTML = `<tr><td colspan="4" class="muted">Create or select a class to begin.</td></tr>`; return }
-    cls.students.sort((a,b)=> b.points - a.points || a.name.localeCompare(b.name));
+
+    // Sort and limit students for performance
+    const visibleStudents = [...cls.students].sort((a,b)=> b.points - a.points || a.name.localeCompare(b.name)).slice(0, 50);
     const fragment = document.createDocumentFragment();
-    cls.students.forEach(stu=>{
+
+    visibleStudents.forEach(stu=>{
       const tr = document.createElement('tr');
       tr.dataset.id = stu.id;
       if(state.ui.selectedStudentId===stu.id) tr.style.outline = '2px solid var(--accent-2)';
@@ -301,17 +361,19 @@
             <button class="btn small ghost" data-act="remove">🗑</button>
           </div>
         </td>`;
+
       tr.addEventListener('click', (e)=>{
         if(e.target.closest('button')) return;
         state.ui.selectedStudentId = stu.id; renderStudents();
       });
+
       tr.querySelectorAll('button').forEach(btn=>{
         btn.addEventListener('click', (e)=>{
           const act = btn.dataset.act;
-          if(act==='add1') changePoints(stu, +1);
-          if(act==='add5') changePoints(stu, +5);
-          if(act==='sub2') changePoints(stu, -2);
-          if(act==='sub5') changePoints(stu, -5);
+          if(act==='add1') { changePoints(stu, +1); save(); }
+          if(act==='add5') { changePoints(stu, +5); save(); }
+          if(act==='sub2') { changePoints(stu, -2); save(); }
+          if(act==='sub5') { changePoints(stu, -5); save(); }
           if(act==='shop'){ state.ui.selectedStudentId = stu.id; openShop(); }
           if(act==='rename') renameStudent(stu);
           if(act==='remove') removeStudent(stu);
@@ -322,11 +384,13 @@
     });
     body.appendChild(fragment);
   }
+
   function renderPowerIcon(powerId){
     const p = state.powers.find(x=>x.id===powerId.id) || {emoji:'❔'};
     const title = `${p.emoji} ${p.name} — ${new Date(powerId.ts).toLocaleString()}`;
     return `<span class="chip" title="${escapeHtml(title)}">${p.emoji}</span>`
   }
+
   function renderPowers(){
     const wrap = $('#powerChips');
     wrap.innerHTML = '';
@@ -338,6 +402,7 @@
       wrap.appendChild(b);
     })
   }
+
   function buildShop(){
     const grid = $('#shopGrid');
     grid.innerHTML = '';
@@ -353,6 +418,7 @@
       grid.appendChild(card);
     })
   }
+
   function openShop(){ $('#shopModal').style.display='flex' }
   function closeShop(){ $('#shopModal').style.display='none' }
 
@@ -364,8 +430,9 @@
     const cls = { id: uid(), name: name.trim(), students: [] };
     state.classes.push(cls);
     state.ui.activeClassId = cls.id;
-    renderAll();
+    save().then(renderAll);
   }
+
   function deleteClass(){
     const cls = getActiveClass(); if(!cls) return;
     if(!confirm(`Delete class "${cls.name}"?`)) return;
@@ -373,50 +440,57 @@
     state.classes = state.classes.filter(c=>c.id!==cls.id);
     state.ui.activeClassId = state.classes[0]?.id || null;
     state.ui.selectedStudentId = null;
-    renderAll();
+    save().then(renderAll);
   }
+
   function renameClass(){
     const cls = getActiveClass(); if(!cls) return;
     const name = prompt('Rename class:', cls.name);
     if(!name) return;
     pushHistory();
     cls.name = name.trim();
-    renderAll();
+    save().then(renderAll);
   }
+
   function addStudent(name){
     const cls = getActiveClass(); if(!cls) return alert('Select a class first.');
     const clean = (name||'').trim(); if(!clean) return;
     if(cls.students.some(s=>s.name.toLowerCase()===clean.toLowerCase())) return;
     pushHistory();
     cls.students.push({ id: uid(), name: clean, points: 0, powers: [] });
-    renderStudents(); renderClasses();
+    save().then(() => { renderStudents(); renderClasses(); });
   }
+
   function removeStudent(stu){
     const cls = getActiveClass(); if(!cls) return;
     if(!confirm(`Remove ${stu.name}?`)) return;
     pushHistory();
     cls.students = cls.students.filter(s=>s.id!==stu.id);
     if(state.ui.selectedStudentId===stu.id) state.ui.selectedStudentId=null;
-    renderStudents(); renderClasses();
+    save().then(() => { renderStudents(); renderClasses(); });
   }
+
   function renameStudent(stu){
     const name = prompt('Rename student:', stu.name);
     if(!name) return;
     pushHistory();
     stu.name = name.trim();
-    renderStudents();
+    save().then(renderStudents);
   }
+
   function changePoints(stu, delta){
     pushHistory();
     stu.points = (stu.points||0) + Number(delta||0);
-    renderStudents(); renderClasses();
+    save().then(() => { renderStudents(); renderClasses(); });
   }
+
   function applyCustomToSelected(){
     const delta = parseInt($('#customDelta').value,10);
     if(!delta) return;
     const stu = getActiveStudent(); if(!stu) return alert('Select a student first (click a row).');
     changePoints(stu, delta);
   }
+
   function purchasePower(powerId){
     const stu = getActiveStudent(); if(!stu) { alert('Select a student (click a row).'); return; }
     const p = state.powers.find(x=>x.id===powerId); if(!p) return;
@@ -424,8 +498,9 @@
     pushHistory();
     stu.points -= p.cost;
     stu.powers.push({ id: p.id, ts: Date.now() });
-    renderStudents(); renderClasses();
+    save().then(() => { renderStudents(); renderClasses(); });
   }
+
   function addPowerFromInputs(){
     const emoji = ($('#powerEmoji').value || '✨').trim();
     const name = ($('#powerName').value || '').trim();
@@ -434,8 +509,9 @@
     pushHistory();
     state.powers.push({ id: uid(), emoji, name, cost });
     $('#powerEmoji').value=''; $('#powerName').value=''; $('#powerCost').value='';
-    renderPowers(); buildShop();
+    save().then(() => { renderPowers(); buildShop(); });
   }
+
   function importNamesFromTextarea(){
     const cls = getActiveClass(); if(!cls) return alert('Select a class first.');
     const text = ($('#namesInput').value||'').trim();
@@ -445,8 +521,10 @@
     if(!unique.length){ alert('No new names to add.'); return }
     pushHistory();
     unique.forEach(n=> cls.students.push({ id: uid(), name:n, points:0, powers:[] }));
-    $('#namesInput').value=''; renderStudents(); renderClasses();
+    $('#namesInput').value='';
+    save().then(() => { renderStudents(); renderClasses(); });
   }
+
   function importCsvFile(file){
     const reader = new FileReader();
     reader.onload = ()=>{
@@ -456,12 +534,14 @@
     };
     reader.readAsText(file);
   }
+
   function giveAll(delta){
     const cls = getActiveClass(); if(!cls) return;
     pushHistory();
     cls.students.forEach(s=> s.points = (s.points||0)+delta );
-    renderStudents(); renderClasses();
+    save().then(() => { renderStudents(); renderClasses(); });
   }
+
   function exportJson(){
     const blob = new Blob([JSON.stringify(state,null,2)], {type:'application/json'});
     const url = URL.createObjectURL(blob);
@@ -469,6 +549,7 @@
     a.href=url; a.download='magic_it_class_backup.json'; a.click();
     URL.revokeObjectURL(url);
   }
+
   function importJson(){
     const input = document.createElement('input');
     input.type='file'; input.accept='.json';
@@ -480,19 +561,22 @@
           const obj = JSON.parse(r.result);
           if(!obj || !obj.classes) throw new Error('Invalid file');
           pushHistory();
-          state = obj; renderAll();
+          state = obj;
+          save().then(renderAll);
         }catch(e){ alert('Invalid JSON') }
       };
       r.readAsText(f);
     }
     input.click();
   }
+
   function resetAll(){
     if(!confirm('This will erase all classes and data. Continue?')) return;
     pushHistory();
     state = { classes: [], powers: defaultPowers.map(p=>({...p})), ui:{activeClassId:null, selectedStudentId:null}, history:[] };
-    renderAll();
+    save().then(renderAll);
   }
+
   function escapeHtml(str){
     return String(str).replace(/[&<>"]/g, s=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[s]) )
   }
@@ -519,16 +603,8 @@
   $('#btnUndo').addEventListener('click', undo);
   $('#btnSave').addEventListener('click', save);
 
-  // Initial render
-  if(!state.classes.length){
-    const sample = { id: uid(), name: '7A', students:[
-      { id: uid(), name:'Ali', points: 3, powers:[] },
-      { id: uid(), name:'Zarina', points: 1, powers:[] },
-      { id: uid(), name:'Said', points: 0, powers:[] },
-    ]};
-    state.classes.push(sample); state.ui.activeClassId = sample.id;
-  }
-  renderAll();
+  // Initialize the app
+  init();
 })();
 </script>
 </body>

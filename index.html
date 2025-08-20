@@ -224,18 +224,25 @@
     { id: uid(), emoji:'🎁', name:'Mystery Chest', cost:100 },
   ];
 
-  let state = { classes: [], powers: defaultPowers, ui: { activeClassId: null, selectedStudentId: null, currentPage: 1 }, history: [] };
+  let state = {
+    classes: [],
+    powers: defaultPowers,
+    ui: { activeClassId: null, selectedStudentId: null, currentPage: 1 },
+    history: [],
+    __historyLastSave: 0  // cooldown timestamp
+  };
   let renderRequest = null;
+  let saveTimeout = null;
 
-  // Open/create the IndexedDB database
   const dbPromise = indexedDB.open(DB_NAME, DB_VERSION);
 
   dbPromise.onupgradeneeded = (event) => {
     const db = event.target.result;
-    db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+    if (!db.objectStoreNames.contains(STORE_NAME)) {
+      db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+    }
   };
 
-  // Utilities
   function uid(){ return 'id-' + Math.random().toString(36).slice(2,9) }
 
   async function save() {
@@ -250,6 +257,11 @@
       console.error('Error saving data:', e);
       showSaveStatus('Save failed!');
     }
+  }
+
+  function debouncedSave() {
+    clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(save, 500);
   }
 
   async function load() {
@@ -274,14 +286,33 @@
   }
 
   function pushHistory(){
-    state.history.push(JSON.stringify(state));
-    if(state.history.length>20) state.history.shift();
+    const now = Date.now();
+    if (now - state.__historyLastSave < 2000) return; // 2s cooldown
+    state.__historyLastSave = now;
+
+    try {
+      const snapshot = JSON.stringify({
+        classes: state.classes,
+        powers: state.powers,
+        ui: { activeClassId: state.ui.activeClassId, selectedStudentId: state.ui.selectedStudentId }
+      });
+      state.history.push(snapshot);
+      if (state.history.length > 20) state.history.shift();
+    } catch (e) {
+      console.warn("Failed to push history", e);
+    }
   }
 
   function undo(){
     const snapshot = state.history.pop();
-    if(!snapshot) return;
-    try{ state = JSON.parse(snapshot); renderAll(); }catch(e){}
+    if (!snapshot) return;
+    try {
+      const parsed = JSON.parse(snapshot);
+      Object.assign(state, parsed);
+      scheduleRender();
+    } catch (e) {
+      console.error("Undo failed", e);
+    }
   }
 
   function scheduleRender() {
@@ -293,35 +324,92 @@
     }
   }
 
-  // Rendering
   async function init() {
-    const savedState = await load();
-    if (savedState) {
-      state = savedState;
-    } else if (!state.classes.length) {
-      // Create a sample class if no data exists
-      const sample = { id: uid(), name: '7A', students: [
-        { id: uid(), name:'Ali', points: 3, powers:[] },
-        { id: uid(), name:'Zarina', points: 1, powers:[] },
-        { id: uid(), name:'Said', points: 0, powers:[] },
-      ]};
-      state.classes.push(sample);
-      state.ui.activeClassId = sample.id;
-      await save();
+    try {
+      const savedState = await load();
+      if (savedState) {
+        state = savedState;
+      } else if (!state.classes.length) {
+        const sample = {
+          id: uid(), name: '7A',
+          students: [
+            { id: uid(), name:'Ali', points: 3, powers:[] },
+            { id: uid(), name:'Zarina', points: 1, powers:[] },
+            { id: uid(), name:'Said', points: 0, powers:[] },
+          ]
+        };
+        state.classes.push(sample);
+        state.ui.activeClassId = sample.id;
+        debouncedSave();
+      }
+      renderAll();
+
+      // Event delegation for student actions
+      $('#studentsBody').addEventListener('click', handleStudentAction);
+    } catch (e) {
+      console.error('Init failed:', e);
+      alert('Failed to load app. Try resetting.');
     }
-    renderAll();
   }
 
-  function renderAll(){ renderClasses(); renderPowers(); renderStudents(); updateActiveClassChip(); buildShop(); updatePagination(); }
+  function handleStudentAction(e) {
+    const row = e.target.closest('tr');
+    if (!row) return;
+    const stuId = row.dataset.id;
+    const cls = getActiveClass();
+    const student = cls?.students.find(s => s.id === stuId);
+    if (!student) return;
+
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    e.stopPropagation();
+
+    pushHistory();
+
+    if (act === 'add1') changePoints(student, 1);
+    else if (act === 'add5') changePoints(student, 5);
+    else if (act === 'sub2') changePoints(student, -2);
+    else if (act === 'sub5') changePoints(student, -5);
+    else if (act === 'shop') {
+      state.ui.selectedStudentId = student.id;
+      openShop();
+    }
+    else if (act === 'rename') renameStudent(student);
+    else if (act === 'remove') removeStudent(student);
+
+    debouncedSave();
+  }
+
+  function renderAll(){
+    renderClasses();
+    renderPowers();
+    renderStudents();
+    updateActiveClassChip();
+    buildShop();
+    updatePagination();
+  }
 
   function renderClasses(){
     const list = $('#classList');
     list.innerHTML = '';
-    state.classes.forEach(cls =>{
+    state.classes.forEach(cls => {
       const div = document.createElement('div');
-      div.className = 'class-item' + (cls.id===state.ui.activeClassId ? ' active':'' );
-      div.innerHTML = `<div style="display:flex;flex-direction:column"><strong>${escapeHtml(cls.name)}</strong><small class="muted">${cls.students.length} students</small></div><div class="class-actions"><span class="chip">Pts avg: ${avgPoints(cls)}</span></div>`;
-      div.addEventListener('click', ()=>{ state.ui.activeClassId = cls.id; state.ui.selectedStudentId = null; state.ui.currentPage = 1; scheduleRender(); });
+      div.className = 'class-item' + (cls.id === state.ui.activeClassId ? ' active' : '');
+      div.innerHTML = `
+        <div style="display:flex;flex-direction:column">
+          <strong>${escapeHtml(cls.name)}</strong>
+          <small class="muted">${cls.students.length} students</small>
+        </div>
+        <div class="class-actions">
+          <span class="chip">Pts avg: ${avgPoints(cls)}</span>
+        </div>`;
+      div.addEventListener('click', () => {
+        state.ui.activeClassId = cls.id;
+        state.ui.selectedStudentId = null;
+        state.ui.currentPage = 1;
+        scheduleRender();
+      });
       list.appendChild(div);
     });
   }
@@ -334,45 +422,44 @@
 
   function avgPoints(cls){
     const n = cls.students.length || 1;
-    const sum = cls.students.reduce((a,s)=>a+(s.points||0),0);
-    return Math.round(sum/n);
+    const sum = cls.students.reduce((a,s) => a + (s.points || 0), 0);
+    return Math.round(sum / n);
   }
 
-  function getActiveClass(){ return state.classes.find(c=>c.id===state.ui.activeClassId) || null }
-
-  function getActiveStudent(){ const cls=getActiveClass(); if(!cls) return null; return cls.students.find(s=>s.id===state.ui.selectedStudentId) || null }
+  function getActiveClass(){ return state.classes.find(c => c.id === state.ui.activeClassId) || null; }
+  function getActiveStudent(){ const cls = getActiveClass(); return cls?.students.find(s => s.id === state.ui.selectedStudentId) || null; }
 
   function renderStudents(){
     const body = $('#studentsBody');
     body.innerHTML = '';
     const cls = getActiveClass();
-    if(!cls){ body.innerHTML = `<tr><td colspan="4" class="muted">Create or select a class to begin.</td></tr>`; return }
+    if (!cls) {
+      body.innerHTML = `<tr><td colspan="4" class="muted">Create or select a class to begin.</td></tr>`;
+      return;
+    }
 
-    // Sort students
-    const sortedStudents = [...cls.students].sort((a,b)=> b.points - a.points || a.name.localeCompare(b.name));
-
-    // Paginate students
+    const sortedStudents = [...cls.students].sort((a,b) => b.points - a.points || a.name.localeCompare(b.name));
     const startIdx = (state.ui.currentPage - 1) * ITEMS_PER_PAGE;
     const paginatedStudents = sortedStudents.slice(startIdx, startIdx + ITEMS_PER_PAGE);
     const fragment = document.createDocumentFragment();
 
-    paginatedStudents.forEach(stu=>{
+    paginatedStudents.forEach(stu => {
       const tr = document.createElement('tr');
       tr.dataset.id = stu.id;
-      if(state.ui.selectedStudentId===stu.id) tr.style.outline = '2px solid var(--accent-2)';
-      const initials = (stu.name.trim()[0]||'?').toUpperCase();
+      if (state.ui.selectedStudentId === stu.id) tr.style.outline = '2px solid var(--accent-2)';
+      const initials = (stu.name.trim()[0] || '?').toUpperCase();
       tr.innerHTML = `
         <td>
           <div class="name-cell">
             <div class="avatar">${initials}</div>
             <div style="display:flex;flex-direction:column;gap:4px">
               <div><strong>${escapeHtml(stu.name)}</strong></div>
-              <div class="powers">${stu.powers.map(pid=>renderPowerIcon(pid)).join('')}</div>
+              <div class="powers">${stu.powers.map(pid => renderPowerIcon(pid)).join('')}</div>
             </div>
           </div>
         </td>
-        <td class="pts">${stu.points||0}</td>
-        <td>${stu.powers.length? '' : '<span class="muted">—</span>'}</td>
+        <td class="pts">${stu.points || 0}</td>
+        <td>${stu.powers.length ? '' : '<span class="muted">—</span>'}</td>
         <td>
           <div class="row-actions">
             <button class="btn small" data-act="add1">+1</button>
@@ -384,25 +471,6 @@
             <button class="btn small ghost" data-act="remove">🗑</button>
           </div>
         </td>`;
-
-      tr.addEventListener('click', (e)=>{
-        if(e.target.closest('button')) return;
-        state.ui.selectedStudentId = stu.id; scheduleRender();
-      });
-
-      tr.querySelectorAll('button').forEach(btn=>{
-        btn.addEventListener('click', (e)=>{
-          const act = btn.dataset.act;
-          if(act==='add1') { changePoints(stu, +1); save(); }
-          if(act==='add5') { changePoints(stu, +5); save(); }
-          if(act==='sub2') { changePoints(stu, -2); save(); }
-          if(act==='sub5') { changePoints(stu, -5); save(); }
-          if(act==='shop'){ state.ui.selectedStudentId = stu.id; openShop(); }
-          if(act==='rename') renameStudent(stu);
-          if(act==='remove') removeStudent(stu);
-          e.stopPropagation();
-        })
-      })
       fragment.appendChild(tr);
     });
     body.appendChild(fragment);
@@ -411,245 +479,269 @@
   function updatePagination() {
     const cls = getActiveClass();
     if (!cls) return;
-
-    const pageInfo = $('#pageInfo');
-    const btnPrev = $('#btnPrev');
-    const btnNext = $('#btnNext');
     const totalPages = Math.ceil(cls.students.length / ITEMS_PER_PAGE);
-
-    pageInfo.textContent = `Page ${state.ui.currentPage} of ${totalPages}`;
-    btnPrev.disabled = state.ui.currentPage <= 1;
-    btnNext.disabled = state.ui.currentPage >= totalPages;
+    $('#pageInfo').textContent = `Page ${state.ui.currentPage} of ${totalPages}`;
+    $('#btnPrev').disabled = state.ui.currentPage <= 1;
+    $('#btnNext').disabled = state.ui.currentPage >= totalPages;
   }
 
   function renderPowerIcon(powerId){
-    const p = state.powers.find(x=>x.id===powerId.id) || {emoji:'❔'};
-    const title = `${p.emoji} ${p.name} — ${new Date(powerId.ts).toLocaleString()}`;
-    return `<span class="chip" title="${escapeHtml(title)}">${p.emoji}</span>`
+    const p = state.powers.find(x => x.id === powerId.id) || { emoji:'❔', name:'Unknown' };
+    const title = `${p.emoji} ${escapeHtml(p.name)} — ${new Date(powerId.ts).toLocaleString()}`;
+    return `<span class="chip" title="${title}">${p.emoji}</span>`;
   }
 
   function renderPowers(){
     const wrap = $('#powerChips');
     wrap.innerHTML = '';
-    state.powers.forEach(p=>{
+    state.powers.forEach(p => {
       const b = document.createElement('span');
       b.className = 'chip';
-      b.title = `${p.emoji} ${p.name} (${p.cost})`;
+      b.title = `${p.emoji} ${escapeHtml(p.name)} (${p.cost})`;
       b.innerHTML = `${p.emoji} ${escapeHtml(p.name)} <span class="muted">(${p.cost})</span>`;
       wrap.appendChild(b);
-    })
+    });
   }
 
   function buildShop(){
     const grid = $('#shopGrid');
     grid.innerHTML = '';
-    state.powers.forEach(p=>{
+    state.powers.forEach(p => {
       const card = document.createElement('div');
       card.className = 'power-card';
       card.innerHTML = `
-        <div class="top"><div style="font-size:22px">${p.emoji}</div><div class="chip">${p.cost} pts</div></div>
+        <div class="top">
+          <div style="font-size:22px">${p.emoji}</div>
+          <div class="chip">${p.cost} pts</div>
+        </div>
         <div style="font-weight:700">${escapeHtml(p.name)}</div>
-        <button class="btn primary" data-id="${p.id}">Buy for Selected</button>
-      `;
-      card.querySelector('button').addEventListener('click', ()=> purchasePower(p.id));
+        <button class="btn primary" data-id="${p.id}">Buy for Selected</button>`;
+      card.querySelector('button').addEventListener('click', () => purchasePower(p.id));
       grid.appendChild(card);
-    })
+    });
   }
 
-  function openShop(){ $('#shopModal').style.display='flex' }
-  function closeShop(){ $('#shopModal').style.display='none' }
+  function openShop(){ $('#shopModal').style.display = 'flex'; }
+  function closeShop(){ $('#shopModal').style.display = 'none'; }
 
   // Actions
   function addClass(){
     const name = prompt('Class name (e.g., 7A):');
-    if(!name) return;
+    if (!name) return;
     pushHistory();
     const cls = { id: uid(), name: name.trim(), students: [] };
     state.classes.push(cls);
     state.ui.activeClassId = cls.id;
     state.ui.currentPage = 1;
-    save().then(scheduleRender);
+    debouncedSave();
+    scheduleRender();
   }
 
   function deleteClass(){
-    const cls = getActiveClass(); if(!cls) return;
-    if(!confirm(`Delete class "${cls.name}"?`)) return;
+    const cls = getActiveClass(); if (!cls) return;
+    if (!confirm(`Delete class "${cls.name}"?`)) return;
     pushHistory();
-    state.classes = state.classes.filter(c=>c.id!==cls.id);
+    state.classes = state.classes.filter(c => c.id !== cls.id);
     state.ui.activeClassId = state.classes[0]?.id || null;
     state.ui.selectedStudentId = null;
     state.ui.currentPage = 1;
-    save().then(scheduleRender);
+    debouncedSave();
+    scheduleRender();
   }
 
   function renameClass(){
-    const cls = getActiveClass(); if(!cls) return;
+    const cls = getActiveClass(); if (!cls) return;
     const name = prompt('Rename class:', cls.name);
-    if(!name) return;
+    if (!name) return;
     pushHistory();
     cls.name = name.trim();
-    save().then(scheduleRender);
+    debouncedSave();
+    scheduleRender();
   }
 
   function addStudent(name){
-    const cls = getActiveClass(); if(!cls) return alert('Select a class first.');
-    const clean = (name||'').trim(); if(!clean) return;
-    if(cls.students.some(s=>s.name.toLowerCase()===clean.toLowerCase())) return;
+    const cls = getActiveClass(); if (!cls) return alert('Select a class first.');
+    const clean = (name || '').trim(); if (!clean) return;
+    if (cls.students.some(s => s.name.toLowerCase() === clean.toLowerCase())) return;
     pushHistory();
     cls.students.push({ id: uid(), name: clean, points: 0, powers: [] });
-    save().then(() => { renderStudents(); renderClasses(); updatePagination(); });
+    debouncedSave();
+    scheduleRender();
   }
 
   function removeStudent(stu){
-    const cls = getActiveClass(); if(!cls) return;
-    if(!confirm(`Remove ${stu.name}?`)) return;
+    const cls = getActiveClass(); if (!cls) return;
+    if (!confirm(`Remove ${stu.name}?`)) return;
     pushHistory();
-    cls.students = cls.students.filter(s=>s.id!==stu.id);
-    if(state.ui.selectedStudentId===stu.id) state.ui.selectedStudentId=null;
-
-    // Adjust current page if needed
+    cls.students = cls.students.filter(s => s.id !== stu.id);
+    if (state.ui.selectedStudentId === stu.id) state.ui.selectedStudentId = null;
     const totalPages = Math.ceil(cls.students.length / ITEMS_PER_PAGE);
     if (state.ui.currentPage > totalPages && totalPages > 0) {
       state.ui.currentPage = totalPages;
     }
-
-    save().then(() => { renderStudents(); renderClasses(); updatePagination(); });
+    debouncedSave();
+    scheduleRender();
   }
 
   function renameStudent(stu){
     const name = prompt('Rename student:', stu.name);
-    if(!name) return;
+    if (!name) return;
     pushHistory();
     stu.name = name.trim();
-    save().then(scheduleRender);
+    debouncedSave();
+    scheduleRender();
   }
 
   function changePoints(stu, delta){
     pushHistory();
-    stu.points = (stu.points||0) + Number(delta||0);
-    save().then(() => { renderStudents(); renderClasses(); });
+    stu.points = (stu.points || 0) + Number(delta || 0);
+    debouncedSave();
+    scheduleRender();
   }
 
   function applyCustomToSelected(){
-    const delta = parseInt($('#customDelta').value,10);
-    if(!delta) return;
-    const stu = getActiveStudent(); if(!stu) return alert('Select a student first (click a row).');
+    const delta = parseInt($('#customDelta').value, 10);
+    if (!delta) return;
+    const stu = getActiveStudent(); if (!stu) return alert('Select a student first (click a row).');
     changePoints(stu, delta);
   }
 
   function purchasePower(powerId){
-    const stu = getActiveStudent(); if(!stu) { alert('Select a student (click a row).'); return; }
-    const p = state.powers.find(x=>x.id===powerId); if(!p) return;
-    if((stu.points||0) < p.cost){ alert(`${stu.name} needs ${p.cost} pts, has ${stu.points}.`); return }
+    const stu = getActiveStudent(); if (!stu) return alert('Select a student (click a row).');
+    const p = state.powers.find(x => x.id === powerId); if (!p) return;
+    if ((stu.points || 0) < p.cost) return alert(`${stu.name} needs ${p.cost} pts, has ${stu.points}.`);
     pushHistory();
     stu.points -= p.cost;
     stu.powers.push({ id: p.id, ts: Date.now() });
-    save().then(() => { renderStudents(); renderClasses(); });
+    debouncedSave();
+    scheduleRender();
   }
 
   function addPowerFromInputs(){
     const emoji = ($('#powerEmoji').value || '✨').trim();
     const name = ($('#powerName').value || '').trim();
-    const cost = parseInt($('#powerCost').value,10) || 10;
-    if(!name) return alert('Enter power name.');
+    const cost = parseInt($('#powerCost').value, 10) || 10;
+    if (!name) return alert('Enter power name.');
     pushHistory();
     state.powers.push({ id: uid(), emoji, name, cost });
-    $('#powerEmoji').value=''; $('#powerName').value=''; $('#powerCost').value='';
-    save().then(() => { renderPowers(); buildShop(); });
+    $('#powerEmoji').value = '';
+    $('#powerName').value = '';
+    $('#powerCost').value = '';
+    debouncedSave();
+    renderPowers();
+    buildShop();
   }
 
   function importNamesFromTextarea(){
-    const cls = getActiveClass(); if(!cls) return alert('Select a class first.');
-    const text = ($('#namesInput').value||'').trim();
-    if(!text) return;
-    const names = text.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
-    const unique = names.filter(n=> !cls.students.some(s=>s.name.toLowerCase()===n.toLowerCase()) );
-    if(!unique.length){ alert('No new names to add.'); return }
+    const cls = getActiveClass(); if (!cls) return alert('Select a class first.');
+    const text = ($('#namesInput').value || '').trim();
+    if (!text) return;
+    const names = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const unique = names.filter(n => !cls.students.some(s => s.name.toLowerCase() === n.toLowerCase()));
+    if (!unique.length) return alert('No new names to add.');
     pushHistory();
-    unique.forEach(n=> cls.students.push({ id: uid(), name:n, points:0, powers:[] }));
-    $('#namesInput').value='';
+    unique.forEach(n => cls.students.push({ id: uid(), name: n, points: 0, powers: [] }));
+    $('#namesInput').value = '';
     state.ui.currentPage = 1;
-    save().then(() => { renderStudents(); renderClasses(); updatePagination(); });
+    debouncedSave();
+    scheduleRender();
   }
 
   function importCsvFile(file){
+    if (file.size > 1e6) return alert("File too large (max 1MB)");
     const reader = new FileReader();
-    reader.onload = ()=>{
+    reader.onload = () => {
       const text = reader.result || '';
-      const names = text.split(/\r?\n/).map(line=> line.split(',')[0].trim()).filter(Boolean);
-      $('#namesInput').value = ( ($('#namesInput').value||'') + '\n' + names.join('\n') ).trim();
+      const names = text.split(/\r?\n/).map(line => line.split(',')[0].trim()).filter(Boolean);
+      const textarea = $('#namesInput');
+      textarea.value = ((textarea.value || '') + '\n' + names.join('\n')).trim();
+      $('#fileCsv').value = ''; // Prevent re-trigger
     };
     reader.readAsText(file);
   }
 
   function giveAll(delta){
-    const cls = getActiveClass(); if(!cls) return;
+    const cls = getActiveClass(); if (!cls) return;
     pushHistory();
-    cls.students.forEach(s=> s.points = (s.points||0)+delta );
-    save().then(() => { renderStudents(); renderClasses(); });
+    cls.students.forEach(s => s.points = (s.points || 0) + delta);
+    debouncedSave();
+    scheduleRender();
   }
 
   function exportJson(){
-    const blob = new Blob([JSON.stringify(state,null,2)], {type:'application/json'});
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href=url; a.download='magic_it_class_backup.json'; a.click();
+    a.href = url;
+    a.download = 'magic_it_class_backup.json';
+    a.click();
     URL.revokeObjectURL(url);
   }
 
   function importJson(){
     const input = document.createElement('input');
-    input.type='file'; input.accept='.json';
-    input.onchange = ()=>{
-      const f = input.files[0]; if(!f) return;
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = () => {
+      const f = input.files[0]; if (!f) return;
       const r = new FileReader();
-      r.onload = ()=>{
-        try{
+      r.onload = () => {
+        try {
           const obj = JSON.parse(r.result);
-          if(!obj || !obj.classes) throw new Error('Invalid file');
+          if (!obj || !obj.classes) throw new Error('Invalid format');
           pushHistory();
           state = obj;
           state.ui.currentPage = 1;
-          save().then(scheduleRender);
-        }catch(e){ alert('Invalid JSON') }
+          debouncedSave();
+          scheduleRender();
+        } catch (e) {
+          alert('Invalid JSON file');
+        }
       };
       r.readAsText(f);
-    }
+    };
     input.click();
   }
 
   function resetAll(){
-    if(!confirm('This will erase all classes and data. Continue?')) return;
+    if (!confirm('This will erase all data. Continue?')) return;
     pushHistory();
-    state = { classes: [], powers: defaultPowers.map(p=>({...p})), ui:{activeClassId:null, selectedStudentId:null, currentPage: 1}, history:[] };
-    save().then(scheduleRender);
+    state = {
+      classes: [],
+      powers: defaultPowers.map(p => ({...p})),
+      ui: { activeClassId: null, selectedStudentId: null, currentPage: 1 },
+      history: [],
+      __historyLastSave: 0
+    };
+    debouncedSave();
+    scheduleRender();
   }
 
   function escapeHtml(str){
-    return String(str).replace(/[&<>"]/g, s=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[s]) )
+    return String(str).replace(/[&<>"]/g, s => ({'&':'&amp;','<':'<','>':'>','"':'&quot;'}[s]));
   }
 
-  // Event wiring
+  // Event Listeners
   $('#btnAddClass').addEventListener('click', addClass);
   $('#btnDeleteClass').addEventListener('click', deleteClass);
   $('#btnRenameClass').addEventListener('click', renameClass);
-  $('#btnAddStudent').addEventListener('click', ()=>{
+  $('#btnAddStudent').addEventListener('click', () => {
     const name = prompt('Student name:');
-    if(name) addStudent(name);
+    if (name) addStudent(name);
   });
-  $('#btnGiveAll').addEventListener('click', ()=> giveAll(1));
+  $('#btnGiveAll').addEventListener('click', () => giveAll(1));
   $('#btnOpenShop').addEventListener('click', openShop);
   $('#closeShop').addEventListener('click', closeShop);
-  $('#shopModal').addEventListener('click', (e)=>{ if(e.target.id==='shopModal') closeShop(); });
+  $('#shopModal').addEventListener('click', e => { if (e.target.id === 'shopModal') closeShop(); });
   $('#btnAddPower').addEventListener('click', addPowerFromInputs);
   $('#btnImportNames').addEventListener('click', importNamesFromTextarea);
-  $('#fileCsv').addEventListener('change', (e)=>{ const f=e.target.files[0]; if(f) importCsvFile(f) });
+  $('#fileCsv').addEventListener('change', e => { const file = e.target.files[0]; if (file) importCsvFile(file); });
   $('#btnApplyCustom').addEventListener('click', applyCustomToSelected);
   $('#btnExport').addEventListener('click', exportJson);
   $('#btnImportJson').addEventListener('click', importJson);
   $('#btnReset').addEventListener('click', resetAll);
   $('#btnUndo').addEventListener('click', undo);
-  $('#btnSave').addEventListener('click', save);
+  $('#btnSave').addEventListener('click', () => { clearTimeout(saveTimeout); save(); }); // Immediate save
   $('#btnPrev').addEventListener('click', () => {
     if (state.ui.currentPage > 1) {
       state.ui.currentPage--;
@@ -667,7 +759,6 @@
     }
   });
 
-  // Initialize the app
   init();
 })();
 </script>
